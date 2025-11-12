@@ -1,0 +1,403 @@
+let isInMeeting = false;
+let recordingStarted = false;
+let autoRecordEnabled = false;
+let meetingStartTimeout = null;
+
+// Check auto record permission on load
+checkAutoRecordPermission();
+
+async function checkAutoRecordPermission() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['autoRecordPermission'], (result) => {
+      autoRecordEnabled = result.autoRecordPermission || false;
+      console.log("🔐 Auto record enabled:", autoRecordEnabled);
+      resolve(autoRecordEnabled);
+    });
+  });
+}
+
+// DETECT MEETING USING MAIN CONTAINER
+function startMeetingDetection() {
+  console.log("🚀 Starting meeting detection...");
+  
+  let lastState = false;
+  
+  setInterval(() => {
+    // PRIMARY DETECTION: Main meeting container
+    const mainContainer = document.querySelector('.main-body-layout_mainBody__YKEeP');
+    const containerExists = !!mainContainer;
+    
+    let containerVisible = false;
+    if (mainContainer) {
+      const rect = mainContainer.getBoundingClientRect();
+      containerVisible = rect.width > 500 && rect.height > 300;
+    }
+    
+    const meetingDetected = containerExists && containerVisible;
+    
+    console.log("🔍 Meeting check:", {
+      meetingDetected: meetingDetected,
+      isInMeeting: isInMeeting
+    });
+    
+    if (meetingDetected && !lastState && !isInMeeting) {
+      console.log("🎯 MEETING STARTED!");
+      startMeetingWithDelay();
+    } else if (!meetingDetected && lastState && isInMeeting) {
+      console.log("🛑 MEETING ENDED!");
+      meetingEnded();
+    }
+    
+    lastState = meetingDetected;
+  }, 2000);
+}
+
+// EXACT END BUTTON DETECTION WITH YOUR SELECTORS
+function setupEndButtonDetection() {
+  console.log("🖱️ Setting up exact End button detection...");
+  
+  // Method 1: Direct click listeners for specific buttons
+  function addDirectListeners() {
+    // Main End button in footer
+    const mainEndButton = document.querySelector('#foot-bar > div.footer__leave-btn-container > button');
+    if (mainEndButton && !mainEndButton.hasAttribute('data-recorder-listener')) {
+      console.log("✅ Adding listener to Main End Button");
+      mainEndButton.setAttribute('data-recorder-listener', 'true');
+      mainEndButton.addEventListener('click', function() {
+        console.log("🎯 MAIN END BUTTON CLICKED - Waiting for popup...");
+        // When main end button is clicked, wait for popup options
+        setTimeout(setupPopupButtonListeners, 500);
+      });
+    }
+    
+    // Setup popup buttons immediately in case they already exist
+    setupPopupButtonListeners();
+  }
+  
+  // Method 2: Listeners for popup options
+  function setupPopupButtonListeners() {
+    // "End meeting for all" button
+    const endForAllButton = document.querySelector('#wc-footer > div.footer__inner.leave-option-container > div:nth-child(2) > div > div > button.zmu-btn.leave-meeting-options__btn.leave-meeting-options__btn--default.leave-meeting-options__btn--danger.zmu-btn--default.zmu-btn__outline--white');
+    if (endForAllButton && !endForAllButton.hasAttribute('data-recorder-listener')) {
+      console.log("✅ Adding listener to 'End meeting for all' button");
+      endForAllButton.setAttribute('data-recorder-listener', 'true');
+      endForAllButton.addEventListener('click', function() {
+        console.log("🎯 END MEETING FOR ALL CLICKED - STOPPING RECORDING!");
+        stopRecording();
+      });
+    }
+    
+    // "Leave meeting" button  
+    const leaveMeetingButton = document.querySelector('#wc-footer > div.footer__inner.leave-option-container > div:nth-child(2) > div > div > button:nth-child(2)');
+    if (leaveMeetingButton && !leaveMeetingButton.hasAttribute('data-recorder-listener')) {
+      console.log("✅ Adding listener to 'Leave meeting' button");
+      leaveMeetingButton.setAttribute('data-recorder-listener', 'true');
+      leaveMeetingButton.addEventListener('click', function() {
+        console.log("🎯 LEAVE MEETING CLICKED - STOPPING RECORDING!");
+        stopRecording();
+      });
+    }
+  }
+  
+  // Method 3: Global click listener as backup
+  document.addEventListener('click', function(event) {
+    const target = event.target;
+    
+    // Check if clicked element matches any of our selectors
+    const isMainEndButton = target.closest('#foot-bar > div.footer__leave-btn-container > button');
+    const isEndForAllButton = target.closest('#wc-footer > div.footer__inner.leave-option-container > div:nth-child(2) > div > div > button.zmu-btn.leave-meeting-options__btn.leave-meeting-options__btn--default.leave-meeting-options__btn--danger.zmu-btn--default.zmu-btn__outline--white');
+    const isLeaveMeetingButton = target.closest('#wc-footer > div.footer__inner.leave-option-container > div:nth-child(2) > div > div > button:nth-child(2)');
+    
+    if (isEndForAllButton || isLeaveMeetingButton) {
+      console.log("🎯 GLOBAL CLICK - End button detected!");
+      stopRecording();
+    }
+    
+    if (isMainEndButton) {
+      console.log("🎯 GLOBAL CLICK - Main End button clicked, waiting for popup...");
+      setTimeout(setupPopupButtonListeners, 500);
+    }
+  }, true);
+  
+  // Method 4: Observer for dynamic button creation
+  const observer = new MutationObserver(function(mutations) {
+    mutations.forEach(function(mutation) {
+      if (mutation.type === 'childList') {
+        addDirectListeners();
+      }
+    });
+  });
+  
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true
+  });
+  
+  // Initial setup
+  addDirectListeners();
+  
+  // Also check every second for new buttons
+  setInterval(addDirectListeners, 1000);
+}
+
+function startMeetingWithDelay() {
+  if (isInMeeting) return;
+  
+  if (meetingStartTimeout) {
+    clearTimeout(meetingStartTimeout);
+  }
+  
+  console.log("⏰ Starting 3-second delay before recording...");
+  
+  meetingStartTimeout = setTimeout(() => {
+    console.log("⏰ 3-second delay completed - starting meeting");
+    meetingStarted();
+  }, 3000);
+}
+
+function meetingStarted() {
+  if (isInMeeting) return;
+  
+  console.log("🎯 MEETING STARTED");
+  isInMeeting = true;
+  
+  if (autoRecordEnabled && !recordingStarted) {
+    console.log("🎬 AUTO RECORDING STARTING");
+    startAutoRecording();
+  }
+  
+  showMeetingNotification("started");
+  chrome.storage.local.set({ isInMeeting: isInMeeting });
+}
+
+function stopRecording() {
+  console.log("🛑 STOP RECORDING CALLED");
+  
+  if (meetingStartTimeout) {
+    clearTimeout(meetingStartTimeout);
+    meetingStartTimeout = null;
+  }
+  
+  if (isInMeeting) {
+    meetingEnded();
+  }
+}
+
+function meetingEnded() {
+  if (!isInMeeting) return;
+  
+  console.log("🎯 MEETING ENDED");
+  isInMeeting = false;
+  
+  if (recordingStarted) {
+    console.log("⏹️ STOPPING RECORDING AND DOWNLOADING");
+    stopAutoRecording();
+  }
+  
+  recordingStarted = false;
+  showMeetingNotification("ended");
+  chrome.storage.local.set({ isInMeeting: isInMeeting });
+}
+
+function startAutoRecording() {
+  if (recordingStarted) return;
+  
+  console.log("🎬 Starting auto recording...");
+  recordingStarted = true;
+  
+  showRecordingPopup();
+  
+  chrome.runtime.sendMessage({ 
+    action: "autoStartRecording"
+  }, (response) => {
+    if (response && response.success) {
+      console.log("✅ Recording started successfully");
+      showRecordingNotification("started");
+    } else {
+      console.log("❌ Recording failed to start");
+      recordingStarted = false;
+      hideRecordingPopup();
+    }
+  });
+}
+
+function stopAutoRecording() {
+  if (!recordingStarted) return;
+  
+  console.log("🛑 Stopping recording and downloading...");
+  
+  hideRecordingPopup();
+  
+  chrome.runtime.sendMessage({ action: "autoStopRecording" }, (response) => {
+    if (response && response.success) {
+      console.log("✅ Recording stopped and download started successfully");
+      recordingStarted = false;
+      showRecordingNotification("stopped");
+    } else {
+      console.log("❌ Recording failed to stop");
+    }
+  });
+}
+
+function resetRecordingState() {
+  recordingStarted = false;
+  isInMeeting = false;
+  if (meetingStartTimeout) {
+    clearTimeout(meetingStartTimeout);
+    meetingStartTimeout = null;
+  }
+  hideRecordingPopup();
+  console.log("🔄 Recording state reset");
+}
+
+function showMeetingNotification(type) {
+  const existingNotification = document.getElementById('meeting-status-notification');
+  if (existingNotification) existingNotification.remove();
+
+  const notification = document.createElement('div');
+  notification.id = 'meeting-status-notification';
+  
+  const currentTime = new Date().toLocaleTimeString();
+  
+  if (type === "started") {
+    notification.style.cssText = `
+      position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+      background: #4CAF50; color: white; padding: 12px 18px; border-radius: 8px;
+      z-index: 10000; font-family: Arial; font-size: 14px; font-weight: bold;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3); border: 2px solid #45a049;
+    `;
+    notification.textContent = `🔴 Meeting Started - ${currentTime}`;
+  } else {
+    notification.style.cssText = `
+      position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+      background: #f44336; color: white; padding: 12px 18px; border-radius: 8px;
+      z-index: 10000; font-family: Arial; font-size: 14px; font-weight: bold;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3); border: 2px solid #d32f2f;
+    `;
+    notification.textContent = `⏹️ Meeting Ended - ${currentTime}`;
+  }
+  
+  document.body.appendChild(notification);
+  setTimeout(() => notification.remove(), 5000);
+}
+
+function showRecordingNotification(type) {
+  const notification = document.createElement('div');
+  notification.id = 'recording-status-notification';
+  notification.style.cssText = `
+    position: fixed; top: 60px; left: 50%; transform: translateX(-50%);
+    background: ${type === 'started' ? '#2196F3' : '#FF9800'}; color: white;
+    padding: 8px 12px; border-radius: 5px; z-index: 9999; font-family: Arial;
+    font-size: 11px; box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+  `;
+  notification.textContent = type === 'started' 
+    ? '🔴 Recording Started' 
+    : '⏹️ Recording Stopped - Downloading...';
+  
+  document.body.appendChild(notification);
+  setTimeout(() => notification.remove(), 4000);
+}
+
+function showRecordingPopup() {
+  const existingPopup = document.getElementById('recording-live-popup');
+  if (existingPopup) existingPopup.remove();
+
+  const popup = document.createElement('div');
+  popup.id = 'recording-live-popup';
+  popup.style.cssText = `
+    position: fixed; bottom: 20px; right: 20px; background: #d32f2f; color: white;
+    padding: 12px 16px; border-radius: 8px; z-index: 10000; font-family: Arial;
+    font-size: 14px; font-weight: bold; box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    border: 2px solid #b71c1c; display: flex; align-items: center; gap: 8px;
+    min-width: 180px;
+  `;
+
+  const redDot = document.createElement('div');
+  redDot.style.cssText = `
+    width: 12px; height: 12px; background: #ff4444; border-radius: 50%;
+    animation: pulse 1.5s infinite;
+  `;
+
+  const text = document.createElement('span');
+  text.id = 'recording-timer';
+  text.textContent = '00:00';
+
+  const recordingText = document.createElement('span');
+  recordingText.textContent = 'Recording';
+
+  popup.appendChild(redDot);
+  popup.appendChild(text);
+  popup.appendChild(recordingText);
+
+  const style = document.createElement('style');
+  style.textContent = `@keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }`;
+  document.head.appendChild(style);
+
+  document.body.appendChild(popup);
+}
+
+function updateRecordingTimer(time) {
+  const timerElement = document.getElementById('recording-timer');
+  if (timerElement) timerElement.textContent = time;
+}
+
+function hideRecordingPopup() {
+  const popup = document.getElementById('recording-live-popup');
+  if (popup) popup.remove();
+}
+
+// Listen for messages
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  console.log("📨 Content script received:", message.action);
+  
+  if (message.action === "updateAutoRecordPermission") {
+    autoRecordEnabled = message.enabled;
+    console.log("🔐 Auto record permission updated:", autoRecordEnabled);
+    sendResponse({ success: true });
+  }
+
+  if (message.action === "checkMeetingStatus") {
+    sendResponse({ 
+      isInMeeting: isInMeeting, 
+      recording: recordingStarted,
+      autoRecordEnabled: autoRecordEnabled
+    });
+  }
+
+  if (message.action === "updateRecordingTimer") {
+    updateRecordingTimer(message.time);
+    sendResponse({ success: true });
+  }
+
+  if (message.action === "showRecordingPopup") {
+    showRecordingPopup();
+    sendResponse({ success: true });
+  }
+
+  if (message.action === "hideRecordingPopup") {
+    hideRecordingPopup();
+    sendResponse({ success: true });
+  }
+  
+  return true;
+});
+
+// Page load detection
+window.addEventListener('load', () => {
+  console.log("🔄 Page loaded - resetting recording states");
+  resetRecordingState();
+  checkAutoRecordPermission().then(() => {
+    console.log("🔄 Auto record permission rechecked:", autoRecordEnabled);
+  });
+});
+
+// Initial setup
+setTimeout(() => {
+  console.log("🔧 Starting Auto Recorder...");
+  startMeetingDetection();
+  setupEndButtonDetection();
+  console.log("✅ Auto Recorder initialized");
+  console.log("📋 Detection: Main container = Start, Exact End buttons = Stop");
+}, 1000);
+
+console.log("🔍 Auto Recorder content script loaded");
